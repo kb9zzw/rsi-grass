@@ -1,0 +1,301 @@
+#!/usr/bin/env python
+#
+############################################################################
+#
+# MODULE:       r.rsi
+# AUTHOR(S):	Jon Burroughs - NC State University
+# PURPOSE:	  Calculates Regional Snowfall Index for a given climate region
+#
+#		This program is free software under the GNU General Public
+#		License (>=v2). Read the file COPYING that comes with GRASS
+#		for details.
+#
+############################################################################
+#%module
+#%  description: Calculates Regional Snowfall Index for a given climate region
+#%  keywords: snow, snowfall, snow storm, rsi, regional snowfall index
+#%end
+#%option
+#% key: population
+#% type: string
+#% gisprompt: old,cell,raster
+#% description: Population input map
+#% required : yes
+#%end
+#%option
+#% key: region
+#% type: string
+#% gisprompt: old,vector,vector
+#% description: Climate region for RSI
+#% required : yes
+#%end
+#%option
+#% key: snowstorm
+#% type: string
+#% gisprompt: old,vector,vector
+#% description: Snowstorm point data
+#% required : yes
+#%end
+#%option
+#% key: snowgrid
+#% type: string
+#% gisprompt: new,cell,raster
+#% description: Output file for interpolated snowfall
+#% required : no
+#%end
+#%option
+#% key: snowclass
+#% type: string
+#% gisprompt: new,cell,raster
+#% description: Output file for reclassified snowfall
+#% required : no
+#%end
+#%option
+#% key: thresholds
+#% type: string
+#% gisprompt: old_file,file,input
+#% description: Regional snowfall thresholds
+#% required : yes
+#%end
+#%option
+#% key: method
+#% type: string
+#% answer: idw
+#% description: The interpolation method to use.  Acceptable values are 'idw' and 'rst'
+#% required : no
+#%end
+#%option
+#% key: npoints
+#% type: integer
+#% answer: 500
+#% description: Number of points to include in interpolation (if using method=idw)
+#% required : no
+#%end
+#%option
+#% key: power
+#% type: double
+#% answer: 2.0
+#% description: Interpolation power (if using method=idw)
+#% required : no
+#%end
+#%option
+#% key: tension
+#% type: integer
+#% answer: 500
+#% description: Spline tension (if using method=rst)
+#% required : no
+#%end
+#%option
+#% key: column
+#% type: string
+#% answer: snowfall
+#% description: The interpolation column
+#% required : no
+#%end
+#%option
+#% key: regionId
+#% type: string
+#% description: Region identifier
+#% required: yes
+#%end
+
+
+import os, sys
+import grass.script as grass
+import numpy
+
+# Long term historical averages per region
+histAvg = {
+    "ce" : {
+        "meanArea" : [ 166266, 87938, 14571, 2625 ],
+        "meanPop" : [ 27362537, 15697938, 3246706, 893397 ],     
+    },
+
+    "ec" : {
+        "meanArea" : [ 162134, 79090, 12480, 1937 ],
+        "meanPop" : [ 17070832, 8580093, 1332278, 164656 ],
+    },
+        
+    "se" : {
+        "meanArea" : [ 92474, 56935, 18382, 6068 ],
+        "meanPop" : [ 15386476, 9335741, 2875746, 1038792 ],
+    },
+            
+    "ne" : {
+        "meanArea" : [ 134060, 67762, 8144, 1525 ],
+        "meanPop" : [ 49976651, 27785225, 2888413, 279261 ],
+    },
+
+    "sp" : {
+        "meanArea" : [ 193105, 77935, 14161, 3269 ],
+        "meanPop" : [ 10596758, 3821078, 626550, 131978 ],
+    },
+
+    "wc" : {
+        "meanArea" : [ 253633, 114015, 22471, 6824 ],
+        "meanPop" : [ 2281931, 1096858, 203677, 50384 ],
+    }
+}
+
+def main() :
+    # Gather up all the inputs
+    population = options['population']
+    region = options['region']
+    snowstorm = options['snowstorm']
+    snowgrid = options['snowgrid']
+    snowclass = options['snowclass']
+    thresholds = options['thresholds']
+    method = options['method']
+    npoints = options['npoints']
+    power = options['power']
+    tension = options['tension']
+    column = options['column']
+    regionId = options['regionId']
+
+    # optional parameters
+    if options['snowgrid'] :
+        snowgrid = options['snowgrid']
+    else :
+        snowgrid = 'tmp_snowgrid'
+
+    if options['snowclass'] :
+        snowclass = options['snowclass']
+    else :
+        snowclass = 'tmp_snowclass'
+
+    # Sanity check... short circuit if no snowfall obs in region
+    if pointsInRegion(snowstorm, region) == 0 :
+        print "index: 0"
+        print "rsi: 0"
+        return
+
+    # set region to population grid
+    grass.run_command('g.region', rast=population)
+    rdata = grass.region()
+
+    # Convert region vector to raster
+    grass.run_command('v.to.rast', input=region, output='tmp_region', use='val', value=1)
+
+    # Convert point snowstorm vector data to raster
+    grass.run_command('v.to.rast', input=snowstorm, output='tmp_snow_rast', column=column)
+    grass.mapcalc('tmp_snow_int=int(tmp_snow_rast * 10)')
+
+    # Mask to region
+    #grass.run_command('r.mask', input='tmp_region')
+
+    # Create hull around snowfall observations
+    grass.run_command('v.hull', input=snowstorm, output='tmp_hull')
+    grass.run_command('v.to.rast', input='tmp_hull', output='tmp_hull_rast', use='val', value=1)
+
+    # Combine region and hull to form analysis mask
+    grass.mapcalc('tmp_mask=(tmp_hull_rast && tmp_region)')
+    grass.run_command('r.mask', input='tmp_mask')
+ 
+
+    # Interpolate snowfall
+    #grass.mapcalc('tmp_snow_int=int(tmp_snow_rast * 10)')
+    #grass.run_command('r.surf.idw', input='tmp_snow_int', output=snowgrid, npoints=npoints)
+    if method == 'idw' :
+        grass.run_command('v.surf.idw', input=snowstorm, output=snowgrid, column=column, npoints=npoints, power=power)
+    elif method == 'rst' :
+	    grass.run_command('v.surf.rst', input=snowstorm, elev=snowgrid, zcolumn=column, tension=tension)
+
+    # Convert to integer map times 10
+    grass.mapcalc('tmp_snow_int=int(%s * 10)' % (snowgrid))
+
+    # Reclassify
+    #grass.run_command('r.reclass', input=snowgrid, output=snowclass, rules=thresholds)
+    grass.run_command('r.reclass', input='tmp_snow_int', output=snowclass, rules=thresholds)
+
+    # get zonal population stats
+    popsum = [0,0,0,0,0]
+    p = grass.pipe_command('r.univar', flags="t", fs=",", map=population, zones=snowclass)
+    for line in p.stdout :
+        if line.startswith('zone') :
+            continue
+        fields = line.split(',')
+        zone = int(fields[0])
+        sum = float(fields[12])
+        popsum[zone] = sum
+    
+    p.wait()
+    pop = numpy.array(popsum[1:])[::-1]
+
+    # Get zonal area
+    count = [0,0,0,0,0]
+    p = grass.pipe_command('r.univar', flags="t", fs=",", map=snowclass, zones=snowclass)
+    for line in p.stdout :
+        if line.startswith('zone') :
+            continue
+        fields = line.split(',')
+        zone = int(fields[0])
+        n = int(fields[2])
+        count[zone] = n
+    p.wait()
+
+    # Convert areas to square miles (we don't care about zone 0)
+    area = numpy.array(count[1:])[::-1]
+    areaSqMi = area * rdata['ewres'] * rdata['nsres'] / 1000000 * 0.386102
+    
+    # Accumulate area and populations
+    cumArea = numpy.cumsum(areaSqMi)
+    cumPop = numpy.cumsum(pop)
+
+    # Mean areas and populations based on 50 largest storms 
+    meanArea = numpy.array(histAvg[regionId]['meanArea'])[::-1]
+    meanPop = numpy.array(histAvg[regionId]['meanPop'])[::-1]
+
+    # Normalize area and population
+    normArea = cumArea / meanArea
+    normPop = cumPop / meanPop
+
+    # Reporting
+    print "count:", count
+    print "areaSqMi:", areaSqMi
+    print "cumArea:", cumArea
+    print "meanArea:", meanArea
+    print "normArea:", normArea
+    print "pop:", pop
+    print "cumPop:", cumPop
+    print "meanPop:", meanPop
+    print "normPop:", normPop
+ 
+    index = (normArea + normPop).sum()
+    print "index:", index
+    print "rsi:", rsiToCategory(index)
+
+def rsiToCategory(index) :
+    """Converts Regional Snowfall Index to Category"""
+    if index < 1 :
+        rcat = 0
+    elif index < 3 :
+        rcat = 1
+    elif index < 6 :
+        rcat = 2
+    elif index < 10 :
+        rcat = 3
+    elif index < 18 :
+        rcat = 4
+    else :
+        rcat = 5
+    return rcat
+
+def pointsInRegion(snowstorm, region) :
+    points = 0
+    grass.run_command('v.select', ainput=snowstorm, binput=region, output='tmp_pip')
+    p = grass.pipe_command('v.univar', flags='g', map='tmp_pip', column='cat')
+    for line in p.stdout :
+        print '->>', line
+        if line.startswith('n') :
+            points = int(line.split('=')[1])
+            break
+    p.wait()
+    # cleanup
+    grass.run_command('g.remove', vect='tmp_pip')
+    return points
+    
+
+if __name__ == '__main__' :
+    options, flags = grass.parser()
+    main()
+
